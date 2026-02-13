@@ -1,0 +1,36 @@
+library(Seurat)
+library(DOtools)
+library(ggplot2)
+library(dplyr) 
+library(svglite)
+
+outdir <- "/Users/"
+
+##Import dataset
+HFrEF_Human <- readRDS("/Volumes/Storage+/Objects/snRNA_Human.Mice_HFpEF,HFrEF,AS_Mariano/SeuratObject_Human_AS_HFpEF_HFrEF_Ctrl_Annotated_20_10_22.rds")
+
+HFrEF_Human <- UpdateSeuratObject(HFrEF_Human)
+
+#Subset Ctrl. and HFrEF condition 
+HFrEF_Human <- HFrEF_Human %>% subset(condition %in% c("Human-CTRLlv", "Human-HFrEF")) #%>% subset(cell_type %in% "Endothelial")
+
+DefaultAssay(HFrEF_Human) <- "RNA"
+
+genes = c("CIITA", "HLA-DMA", "HLA-DMB","HLA-DPB1")
+
+for(g in genes){
+  # Save the plot into an object
+  
+  sort_x = c("Immune.cells", "Endothelial","Neuro","Pericytes","Cardiomyocytes", "Fibroblasts", "Smooth.Muscle")  
+  
+  p <- DO.Dotplot(HFrEF_Human, Feature = g, group.by.y ="cell_type", group.by.x = "condition", sort_x = c("Human-HFrEF", "Human-CTRLlv"), scale_gene = F, dot.size = c(1,3), hide_zero = F, returnValue = F, log1p_nUMI = F)
+  
+  p + scale_y_discrete(limits = rev(sort_x)) + coord_flip()
+  
+  ggsave(filename = file.path(outdir, paste0("Human_HFrEF_",g,"_Dotplot.pdf")),
+         width = 7,
+         height = 3.5)
+  
+} 
+
+system("open ./")
