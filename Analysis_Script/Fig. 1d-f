@@ -1,0 +1,77 @@
+```{r}
+library(dplyr)
+library(Seurat)
+library(readxl)
+library(VennDiagram)
+library(grid)
+
+setwd("/Users/tilllautenschlager/OneDrive - Johann Wolfgang Goethe Universität/Uni/PhD/Bioinformatic/23_LongTermAMI/For Publication/")
+
+#Calculate DEGs from Mouse HFrEF dataset in ECs 
+{
+Mice <- readRDS("/Volumes/Storage+/Objects/snRNA_Human.Mice_HFpEF,HFrEF,AS_Mariano/240712_SeuratObject_Mouse_Ctrl_HFpEF_HFrEF.rds")
+
+Idents(Mice) <- "condition"
+
+deg_HFrEF_vs_Ctrl <- FindMarkers(
+  Mice,
+  ident.1 = "Mice-HFrEF",
+  ident.2 = "Mice-CTRL",
+  min.pct = 0.05,
+  logfc.threshold = 0.25
+) %>% filter(p_val_adj < 0.05) %>% arrange(p_val_adj)  
+
+deg_HFrEF_vs_Ctrl$gene <- rownames(deg_HFrEF_vs_Ctrl)
+
+data.frame(
+  Upregulated   = sum(deg_HFrEF_vs_Ctrl$avg_log2FC > 0),
+  Downregulated = sum(deg_HFrEF_vs_Ctrl$avg_log2FC < 0)
+)
+
+#Save DEGs as CSV file
+write.csv(deg_HFrEF_vs_Ctrl, "DEG_HFrEF_vs_Ctrl_Mouse.csv", row.names = FALSE)
+}
+
+#Import Mice EC DEG list from HFrEF
+genes_DEG <- read.csv("./Figure 1/Fig. 1c,e,g - VennDiagramms/DEG_HFrEF_vs_Ctrl_Mouse.csv") %>% select(gene, avg_log2FC, p_val, p_val_adj)
+
+#Import ATAC differentially accessible regions from ECs
+ATAC <- read_excel("/Users/tilllautenschlager/Library/CloudStorage/OneDrive-JohannWolfgangGoetheUniversität/Uni/PhD/Bioinformatic/23_LongTermAMI/Analysis/snATAC_Mice_AMI_d28_Till/FromTill/DifferentialPeak_Footprinting_fromLooso/MBC_Ctl_vs_AMI/markers_leiden01/Endothelial_cl_2_cond_markers_list.xlsx", sheet = 3) %>%
+  filter(pvals_adj < 0.05) %>%              # keep only significant
+  select(gene_name, logfoldchanges, pvals, pvals_adj) %>% filter(!is.na(gene_name), gene_name != "")
+
+ATAC_unique <- ATAC %>% distinct(gene_name, .keep_all = TRUE)
+
+# Count up- and downregulated
+data.frame(
+  Upregulated   = sum(ATAC_unique$logfoldchanges > 0),
+  Downregulated = sum(ATAC_unique$logfoldchanges < 0)
+)
+
+genes_DEG  <- unique(genes_DEG$gene)
+genes_ATAC <- unique(ATAC_unique$gene_name)
+
+overlap_genes <- intersect(genes_DEG, genes_ATAC)
+cat("Number of overlapping genes:", length(overlap_genes), "\n")
+head(overlap_genes)
+
+write.csv(overlap_genes, "Overlap_RNA_ATAC_Mouse.csv", row.names = FALSE)
+}
+
+venn.plot <- venn.diagram(
+  x = list(
+    DEG  = genes_DEG,
+    ATAC = genes_ATAC
+  ),
+  filename = NULL,          # plot directly
+  fill = c("firebrick2", "dodgerblue2"),
+  alpha = 0.5,
+  scaled = FALSE,           # equal size circles
+  lwd = 2,
+  cex = 2,
+  cat.cex = 2,
+  cat.pos = c(0, 0)
+)
+
+grid.draw(venn.plot)
+```
