@@ -1,0 +1,163 @@
+import os
+import pathlib
+import matplotlib.pyplot as plt
+import numpy as np
+from tqdm import tqdm
+import dotools_py as do
+import anndata as ad
+import scanpy as sc
+from dotools_py.tl._Statistical import DGEAnalysis
+import decoupler as dc
+
+files = [f for f in os.listdir("/mnt/davidr/scStorage/DavidR/BioData/AMI_Kuppe_Spatial_2022/Objects") if
+         "snRNA" not in f]
+
+path = pathlib.Path("/mnt/davidr/scStorage/DavidR/BioData/AMI_Kuppe_Spatial_2022/Objects")
+outpath = pathlib.Path("/mnt/davidr/ZMM_shared/DavidR/Requests/Till/Manuscript")
+sc.set_figure_params(scanpy=False, vector_friendly=True)
+
+
+database = {}
+for f in tqdm(files):
+    adata = ad.read_h5ad(path / f)
+    del adata.raw
+    del adata.uns["spatial"]["is_single"]
+    # sc.pl.spatial(adata, color=None, title=f)
+    sc.pp.normalize_total(adata, target_sum=10_000)
+    sc.pp.log1p(adata)
+    adata.var_names = adata.var["feature_name"]
+    sc.pl.spatial(adata, color="CIITA", size=1.5, title=f)
+
+database = {}
+for f in tqdm(files):
+    if "BZ" in f:
+        continue
+    if "IZ_BZ" in f:
+        continue
+    if "RZ_BZ" in f:
+        continue
+    if "RZ_FZ" in f:
+        continue
+
+    adata = ad.read_h5ad(path / f)
+    adata.var_names = adata.var["feature_name"].astype(str)
+    adata.var_names_make_unique()
+    print("\n")
+    try:
+        adata.layers["counts"] = adata.raw.X.copy()
+        print("adata.layers: ", adata.layers["counts"].data)
+        del adata.raw
+    except AttributeError as e:
+        adata.layers["counts"] = adata.X.copy()
+        print("adata.X: ", adata.X.data)
+    name = f.split(".h5ad")[0].strip()
+    database[name] = adata
+
+adata_concat = ad.concat(database.values(), keys=database.keys(), label="name", fill_value=0, index_unique="-")
+adata_concat.obs["region"] = adata_concat.obs["name"].map({
+    'IZ_BZ_P2': "IZ_BZ",
+    'RZ_BZ_P2': "RZ_BZ",
+    'IZ_P3': "IZ",
+    'RZ_P6': "RZ",
+    'RZ_GT_P2': "RZ",
+    'control_P1': "Control",
+    'IZ_P15': "IZ",
+    'control_P7': "Control",
+    'RZ_P6_2': "RZ",
+    'FZ_GT_P4': "FZ",
+    'FZ_P20': "FZ",
+    'control_P17': "Control",
+    'control_P8': "Control",
+    'GT_IZ_P13': "IZ",
+    'RZ_BZ_P3': "RZ_BZ",
+    'RZ_FZ_P5': "RZ_FZ",
+    'RZ_P9': "RZ",
+    'IZ_P10': "IZ",
+    'RZ_P11': "RZ",
+    'RZ_P3': "RZ",
+    'FZ_P14': "FZ",
+    'GT_IZ_P9': "IZ",
+    'GT_IZ_P9_rep2': "IZ",
+    'IZ_P16': "IZ",
+    'RZ_BZ_P12': "RZ_BZ",
+    'FZ_P18': "FZ",
+    'FZ_GT_P19': "FZ",
+    'GT_IZ_P15': "IZ"
+})
+adata_concat.X = adata_concat.layers["counts"].copy()
+
+do.utility.free_memory()
+sc.pp.normalize_total(adata_concat, target_sum=10_000)
+sc.pp.log1p(adata_concat)
+adata_concat.layers["logcounts"] = adata_concat.X.copy()
+
+adata_concat = adata_concat[adata_concat.obs.region.isin(["Control", "RZ", "IZ", "FZ"])].copy()
+del database
+import gc
+gc.collect()
+
+
+pdata = dc.pp.pseudobulk(adata_concat, sample_col="donor_id", groups_col="region", layer="counts")
+pdata.layers["counts"] = pdata.X.copy()
+pdata_copy = pdata.copy()
+
+dc.pp.filter_samples(pdata, min_cells=10, min_counts=1000)
+dc.pp.filter_by_expr(pdata)
+
+tester = DGEAnalysis(
+    data=pdata,
+    group_by="region",
+    batch_key="donor_id",
+    is_pseudobulk=True
+)
+
+# Test for IZ
+iz = adata_concat[adata_concat.obs.region.isin(["Control", "IZ"])]
+sc.pp.filter_genes(iz, min_cells=5)  # Otherwise we are keeping all the genes
+iz.obs["condition"] = iz.obs["region"]
+tester = DGEAnalysis(
+    data=iz, group_by="condition", batch_key="donor_id", is_pseudobulk=False
+)
+tester.mast(reference="Control", groups=["IZ"], layer="logcounts", covariates="donor_id")
+dge = tester.get_dge["mast"]
+print(dge[dge.GeneName == "CIITA"])
+#      GeneName     pvals      padj groups    log2fc  pts_ref  pts_group
+# 3040    CIITA  0.001099  0.002384     IZ  1.134409   0.0213     0.0554
+
+
+# Test for FZ
+fz = adata_concat[adata_concat.obs.region.isin(["Control", "FZ"])]
+sc.pp.filter_genes(fz, min_cells=5)  # Otherwise we are keeping all the genes
+fz.obs["condition"] = fz.obs["region"]
+tester = DGEAnalysis(
+    data=fz, group_by="condition", batch_key="donor_id", is_pseudobulk=False
+)
+tester.mast(reference="Control", groups=["FZ"], layer="logcounts", covariates="donor_id")
+dge = tester.get_dge["mast"]
+print(dge[dge.GeneName == "CIITA"])
+#      GeneName         pvals          padj groups   log2fc  pts_ref  pts_group
+# 2890    CIITA  1.263400e-34  3.305938e-34     FZ  1.02244   0.0213     0.0211
+
+# Test for RZ
+rz = adata_concat[adata_concat.obs.region.isin(["Control", "RZ"])]
+sc.pp.filter_genes(rz, min_cells=5)  # Otherwise we are keeping all the genes
+rz.obs["condition"] = rz.obs["region"]
+tester = DGEAnalysis(
+    data=rz, group_by="condition", batch_key="donor_id", is_pseudobulk=False
+)
+tester.mast(reference="Control", groups=["RZ"], layer="logcounts", covariates="donor_id")
+dge = tester.get_dge["mast"]
+print(dge[dge.GeneName == "CIITA"])
+#     GeneName         pvals          padj groups    log2fc  pts_ref  pts_group
+# 2927    CIITA  1.315802e-21  3.176090e-21     RZ -0.189506   0.0213     0.0284
+
+
+adata_clean = adata_concat[adata_concat.obs.region.isin(["Control", "IZ", "RZ", "FZ"])]
+
+do.pl.barplot(
+    adata_clean, 'region', 'CIITA', batch_key='donor_id', xticks_order=["Control", "RZ", "IZ", "FZ"],
+    reference="Control", groups=["RZ", "IZ", "FZ"], figsize=(3, 5), line_offset=0.1, txt_size=10,
+    groups_pvals=[3.176090e-21, 0.002384, 3.305938e-34], xticks_rotation=45,
+    palette={"Control":"grey", "IZ":"forestgreen", "RZ":"#74BADD", "FZ":"#FF0000"},
+    path=outpath, filename="Barplot_CIITA_HumanRegions_Statistics_MAST.pdf"
+)
