@@ -1,0 +1,85 @@
+import pathlib
+import matplotlib
+matplotlib.use("TkAgg")  # MUST be before pyplot
+import matplotlib.pyplot as plt
+import seaborn as sns
+import scanpy as sc
+import dotools_py as do
+
+sc.set_figure_params(scanpy=False, vector_friendly=True, dpi_save=300)
+
+xenium_path = "/mnt/davidr/scStorage/DavidR/Spatial/Xenium/Results/Objects/AMId28_slide2.h5ad"
+outdir_path = pathlib.Path("/mnt/davidr/ZMM_shared/DavidR/Requests/Till/Manuscript/")
+
+xenium = sc.read_h5ad(xenium_path)
+
+
+xenium.X = xenium.layers["logcounts"].copy()
+xenium.obs_names = xenium.obs_names.astype(str)
+xenium.obs_names_make_unique()
+
+# %% Barplot Ciita in ECs subtypes
+
+for ct in ["ArtEC", "VeinEC", "CapEC", "EndoEC", "LymphEC"]:
+    xenium_ct = do.get.subset(xenium, "annotation", ct, copy=True)
+    pct = dc.pp.pseudobulk(xenium_ct, sample_col="batch", groups_col="condition", layer="counts")
+    dc.pp.filter_samples(pct, min_cells=10, min_counts=1000)
+
+    tester = DGEAnalysis(pct, group_by="condition", batch_key="batch", is_pseudobulk=True)
+    tester.edger(design="~condition", reference="sham", groups=["ami"])
+    df = tester.get_dge["EdgeR"]
+    df = df[df.GeneName == "Ciita"]
+    df.set_index("group", inplace=True)
+
+    xenium_ct.obs["regions"] = xenium_ct.obs["condition"].map({
+        "ami": "MI_day28",
+        "sham": "Sham",
+    })
+
+    if ct in ["ArtEC", "EndoEC"]:
+        ylim = 0.05
+    elif ct == "CapEC":
+        ylim = 0.04
+    else:
+        ylim = 0.06
+
+    do.pl.barplot(xenium_ct, "regions", "Ciita", batch_key="batch",
+                  title=f"Ciita in {ct}",
+                  xticks_order=["Sham", "MI_day28"],
+                  palette={"Sham": "#A0A0A4", "MI_day28": "#FF0000"},
+                  reference="Sham", groups=["MI_day28"],
+                  groups_pvals=[df.loc["ami", "padj"]],
+                  figsize=(3, 6), txt="", txt_size=12, path=outdir_path, ylim_max=ylim,
+                  filename=f"Barplot_Ciita_Xenium_ShamVsMIday28_{ct}_edgeR.pdf"
+                  )
+
+for ct in ["ArtEC", "VeinEC", "CapEC", "EndoEC", "LymphEC"]:
+    xenium_ct = do.get.subset(xenium, "annotation", ct, copy=True)
+
+    tester = DGEAnalysis(xenium_ct, group_by="condition", batch_key="batch")
+    tester.mast(reference="sham", groups=["ami"], layer="logcounts")
+    df = tester.get_dge["mast"]
+    df = df[df.GeneName == "Ciita"]
+    df.set_index("GeneName", inplace=True)
+
+    xenium_ct.obs["regions"] = xenium_ct.obs["condition"].map({
+        "ami": "MI_day28",
+        "sham": "Sham",
+    })
+
+    if ct in ["ArtEC", "EndoEC"]:
+        ylim = 0.05
+    elif ct == "CapEC":
+        ylim = 0.04
+    else:
+        ylim = 0.06
+
+    do.pl.barplot(xenium_ct, "regions", "Ciita", batch_key="batch",
+                  title=f"Ciita in {ct}",
+                  xticks_order=["Sham", "MI_day28"],
+                  palette={"Sham": "#A0A0A4", "MI_day28": "#FF0000"},
+                  reference="Sham", groups=["MI_day28"],
+                  groups_pvals=[df.loc["Ciita", "padj"]],
+                  figsize=(3, 6), txt="", txt_size=12, path=outdir_path, ylim_max=ylim,
+                  filename=f"Barplot_Ciita_Xenium_ShamVsMIday28_{ct}_MAST.pdf"
+                  )
