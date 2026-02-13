@@ -1,0 +1,83 @@
+import pathlib
+
+import matplotlib
+matplotlib.use("TkAgg")  # MUST be before pyplot
+
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+import scanpy as sc
+import dotools_py as do
+
+sc.set_figure_params(scanpy=False, vector_friendly=True, dpi_save=300)
+
+xenium_path = "/mnt/davidr/scStorage/DavidR/Spatial/Xenium/Results/Objects/AMId28_slide2.h5ad"
+outdir_path = pathlib.Path("/mnt/davidr/ZMM_shared/DavidR/Requests/Till/Manuscript/")
+
+xenium = sc.read_h5ad(xenium_path)
+
+xenium.X = xenium.layers["logcounts"].copy()
+xenium.obs_names = xenium.obs_names.astype(str)
+xenium.obs_names_make_unique()
+
+# Create merged annotation
+xenium.obs["annotation_merged"] = xenium.obs["annotation_major"].astype(str)
+
+endothelial_labels = ["CapEC", "ECs", "EndoEC", "LymphEC"]
+
+xenium.obs.loc[
+    xenium.obs["annotation_major"].isin(endothelial_labels),
+    "annotation_merged"
+] = "Endothelial"
+
+do.tl.rank_genes_groups(xenium,"annotation_merged")
+sc.pl.rank_genes_groups_dotplot(xenium)
+
+    all_markers = [
+        "Cd79a", "Cd79b",           # B_cells
+        "Rbm20", "Mhrt",            # CM
+        "Vwf","Pecam1", "Cdh5","Pdgfra", "Pi16",    # Endothelial
+        "C1qc", "Ptprc", "Mrc1",             #Myeloid            # Fibroblasts (Pdgfra already added)
+        "Cdh11", "Krt19",           # MP
+        "Cdh19", "Chl1",                    # Neural
+        "Pdgfrb", "Abcc9",          # Pericytes
+        "Tagln", "Myh11", "Acta2",           # SMC
+        "Cd3d", "Cd3e", "Cd8a"            # T_cells
+
+    ]
+
+df = do.get.mean_expr(xenium, "annotation_merged", all_markers, out_format="wide")
+
+
+
+df_zscore = df.apply(zscore)
+df_zscore = df_zscore.reindex(index=all_markers,
+                              columns=['B_cells', 'CM', 'Endothelial', 'Fibro_activ','Fibroblasts',  'Myeloid', 'Epi_cells','Neural','Pericytes','SMC','T_cells'])
+
+pretty_labels = [
+    "B cells", "Cardiomyocytes", "Endothelial", "Epithelial",
+    "Fibroblasts (activated)", "Fibroblasts", "Myeloid",
+    "Neural", "Pericytes", "Smooth muscle cells", "T cells"
+]
+
+# Create the heatmap
+fig, ax = plt.subplots(figsize=(6, 8))
+sns.heatmap(df_zscore, cmap="RdBu_r", center=0, vmax=2.5, vmin=-2.5, ax=ax, square=True)
+
+# Set pretty x-axis labels
+ax.set_xticklabels(pretty_labels, rotation=45, ha='right')
+
+# Optional: horizontal y-axis gene labels
+ax.set_yticklabels(ax.get_yticklabels(), rotation=0)
+
+ax.set_xlabel("")
+ax.set_ylabel("")
+ax.set_title("Xenium")
+
+# Save the figure
+outpath = r"C:\Users\tilll\OneDrive - Johann Wolfgang Goethe Universität\Uni\PhD\Bioinformatic\23_LongTermAMI\For Publication\Suppl. Figure 3\Xenium - Cell Clustering and\figures\Heatmap_XeniumMarkers.pdf"
+os.makedirs(os.path.dirname(outpath), exist_ok=True)
+plt.tight_layout()
+plt.savefig(outpath, bbox_inches="tight")
+plt.show()
+
