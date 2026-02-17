@@ -1,0 +1,59 @@
+_MEMBER_MyList,_LogP_MyList,GO,Description,_PATTERN_,_RANK_,GiniIndex
+1,-3.3,GO:0045668,negative regulation of osteoblast differentiation,M1,1,0
+1,-4.2,GO:0071363,cellular response to growth factor stimulus,M1,1,0
+1,-2.7,GO:0006605,protein targeting,M1,1,0
+1,-2.5,GO:0048511,rhythmic process,M1,1,0
+1,-2.3,GO:0010977,negative regulation of neuron projection development,M1,1,0
+1,-2.7,mmu04350,TGF-beta signaling pathway - Mus musculus (house mouse),M1,1,0
+1,-3.4,GO:0007167,enzyme-linked receptor protein signaling pathway,M1,1,0
+1,-2.5,GO:1901890,positive regulation of cell junction assembly,M1,1,0
+1,-2.7,R-MMU-9006936,Signaling by TGFB family members,M1,1,0
+1,-3.1,R-MMU-1266738,Developmental Biology,M1,1,0
+1,-2.3,GO:0072657,protein localization to membrane,M1,1,0
+1,-2.1,GO:0046649,lymphocyte activation,M1,1,0
+1,-3.2,GO:0036465,synaptic vesicle recycling,M1,1,0
+1,-4,GO:1902414,protein localization to cell junction,M1,1,0
+1,-2.2,GO:0051098,regulation of binding,M1,1,0
+1,-2.9,GO:0044089,positive regulation of cellular component biogenesis,M1,1,0
+1,-2.1,GO:0045216,cell-cell junction organization,M1,1,0
+1,-3.7,GO:0030865,cortical cytoskeleton organization,M1,1,0
+1,-2.2,GO:0051961,negative regulation of nervous system development,M1,1,0
+1,-2.2,WP572,EGFR1 signaling pathway,M1,1,0
+1,-4.2,GO:0030512,negative regulation of transforming growth factor beta receptor signaling pathway,M1,1,0
+1,-2.8,GO:0034330,cell junction organization,M1,1,0
+1,-3.3,R-MMU-170834,Signaling by TGF-beta Receptor Complex,M1,1,0
+1,-3.5,GO:0090101,negative regulation of transmembrane receptor protein serine/threonine kinase signaling pathway,M1,1,0
+1,-3.4,GO:0097120,receptor localization to synapse,M1,1,0
+1,-2.1,GO:0099003,vesicle-mediated transport in synapse,M1,1,0
+1,-2.3,GO:0045667,regulation of osteoblast differentiation,M1,1,0
+1,-2.1,GO:0051668,localization within membrane,M1,1,0
+1,-3,GO:0051966,"regulation of synaptic transmission, glutamatergic",M1,1,0
+1,-3.5,GO:0090092,regulation of transmembrane receptor protein serine/threonine kinase signaling pathway,M1,1,0
+1,-4.1,GO:0070848,response to growth factor,M1,1,0
+1,-2.3,GO:0050768,negative regulation of neurogenesis,M1,1,0
+1,-2.6,GO:0062014,negative regulation of small molecule metabolic process,M1,1,0
+1,-3.1,GO:0090287,regulation of cellular response to growth factor stimulus,M1,1,0
+1,-3.1,WP265,Delta Notch signaling pathway,M1,1,0
+1,-2.2,GO:1903034,regulation of response to wounding,M1,1,0
+1,-3.5,GO:0045598,regulation of fat cell differentiation,M1,1,0
+1,-2.1,GO:0010975,regulation of neuron projection development,M1,1,0
+1,-3.1,GO:1902905,positive regulation of supramolecular fiber organization,M1,1,0
+1,-2.3,GO:0050921,positive regulation of chemotaxis,M1,1,0
+1,-2.1,GO:0141091,transforming growth factor beta receptor superfamily signaling pathway,M1,1,0
+1,-2.3,GO:0045055,regulated exocytosis,M1,1,0
+1,-4.5,GO:0035418,protein localization to synapse,M1,1,0
+1,-4.8,GO:1903844,regulation of cellular response to transforming growth factor beta stimulus,M1,1,0
+1,-2.5,GO:0001558,regulation of cell growth,M1,1,0
+1,-2.5,WP447,Adipogenesis genes,M1,1,0
+1,-2.4,GO:0050767,regulation of neurogenesis,M1,1,0
+1,-2.9,GO:0045596,negative regulation of cell differentiation,M1,1,0
+1,-4.8,GO:0017015,regulation of transforming growth factor beta receptor signaling pathway,M1,1,0
+1,-3.5,GO:0051960,regulation of nervous system development,M1,1,0
+1,-3,GO:0051495,positive regulation of cytoskeleton organization,M1,1,0
+1,-2.3,GO:0043433,negative regulation of DNA-binding transcription factor activity,M1,1,0
+1,-2.9,GO:0031345,negative regulation of cell projection organization,M1,1,0
+1,-2.3,GO:1903305,regulation of regulated secretory pathway,M1,1,0
+1,-2.2,GO:0099504,synaptic vesicle cycle,M1,1,0
+1,-2.4,GO:0034329,cell junction assembly,M1,1,0
+1,-2.1,GO:0030308,negative regulation of cell growth,M1,1,0
+1,-2.5,GO:0030855,epithelial cell differentiation,M1,1,0
