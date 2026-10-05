@@ -1,0 +1,4 @@
+
+# Run STARE including EC subcluster
+# 11.06.2026; 70s
+time STARE_ABCpp -a base_data/mouse/gencode.vM27.annotation.gtf.gz -o ABC_subEC/ABC_subEC -b AMI-scATAC/ATACPeaks_subEC_CPM.bed -n 5+ -w 5000000 -c 23 -i all_tss -f False
