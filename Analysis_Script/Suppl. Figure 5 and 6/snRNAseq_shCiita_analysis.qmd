@@ -1,0 +1,741 @@
+---
+title: "snRNA-seq of the mouse heart after MI: AAV-shCiita vs AAV-Mock"
+author: "Till Lautenschläger"
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 2
+    code-fold: show
+    embed-resources: true
+    fig-width: 7
+    fig-height: 6
+execute:
+  warning: false
+  message: false
+---
+
+Female C57BL/6 mice after myocardial infarction, AAV-Mock vs AAV-shCiita. Four mice per group; nuclei of two mice were pooled per sample (2 samples per condition). Raw data are available from ArrayExpress.
+
+The input is the processed Seurat object (`snRNA_heart_mouse_shCiitaVsMock.rds`) generated in Python from the Cell Ranger output. Preprocessing covered filtering, doublet removal (scDblFinder), normalisation, Harmony integration, clustering and cell-type annotation. The object contains raw counts, a UMAP and the metadata columns `annotation`, `condition` and `batch`.
+
+## Setup
+
+```{r}
+#| label: setup
+library(Seurat)
+library(SingleCellExperiment)
+library(decontX)
+library(harmony)
+library(tidyverse)
+library(pheatmap)
+library(ggplotify)
+library(ggrepel)
+library(DESeq2)
+
+options(future.globals.maxSize = 16 * 1024^3)
+set.seed(42)
+
+input_rds <- "data/snRNA_heart_mouse_shCiitaVsMock.rds"
+obj_dir   <- "objects"
+out_dir   <- "figures"
+tab_dir   <- file.path(out_dir, "tables")
+dir.create(obj_dir, showWarnings = FALSE, recursive = TRUE)
+dir.create(tab_dir, showWarnings = FALSE, recursive = TRUE)
+```
+
+## Helper functions
+
+```{r}
+#| label: helpers
+heatmap_colors   <- colorRampPalette(c("#083269", "#8DC1DA", "#D4E6EE", "white",
+                                       "#F9DCCC", "#EC9977", "#BF0027"))(100)
+condition_colors <- c(Mock = "#D4D4D4", shCiita = "#F93F40")
+
+theme_box <- theme_classic(base_size = 12) +
+  theme(plot.title = element_text(face = "bold", hjust = 0.5),
+        axis.text = element_text(colour = "black"))
+
+save_plot <- function(p, file, width, height) {
+  ggsave(file, p, path = out_dir, width = width, height = height)
+  p
+}
+
+recluster <- function(obj, dims = 1:20, resolution = 0.5, nfeatures = 2000) {
+  obj <- FindVariableFeatures(obj, nfeatures = nfeatures, verbose = FALSE)
+  obj <- ScaleData(obj, verbose = FALSE)
+  obj <- RunPCA(obj, npcs = max(dims) + 10, verbose = FALSE)
+  obj <- RunHarmony(obj, group.by.vars = "batch", verbose = FALSE)
+  obj <- RunUMAP(obj, reduction = "harmony", dims = dims, reduction.name = "umap_sub", verbose = FALSE)
+  obj <- FindNeighbors(obj, reduction = "harmony", dims = dims, verbose = FALSE)
+  obj <- FindClusters(obj, resolution = resolution, verbose = FALSE)
+  obj$subcluster <- obj$seurat_clusters
+  obj
+}
+
+add_score <- function(obj, genes, name, ...) {
+  genes <- genes[genes %in% rownames(obj)]
+  obj <- AddModuleScore(obj, features = list(genes), name = name, ...)
+  obj@meta.data[[name]] <- obj@meta.data[[paste0(name, "1")]]
+  obj@meta.data[[paste0(name, "1")]] <- NULL
+  obj
+}
+
+check_cluster_sizes <- function(obj, expected, what) {
+  observed <- as.numeric(table(obj$subcluster))
+  if (length(observed) != length(expected) || any(observed != expected)) {
+    warning(what, ": cluster sizes differ from the published analysis. ",
+            "Check the cluster names against the marker genes before continuing.")
+  }
+}
+
+pheatmap_left <- function(..., legend_title = NULL) {
+  grDevices::pdf(NULL)
+  dev <- grDevices::dev.cur()
+  on.exit(grDevices::dev.off(dev), add = TRUE)
+  g <- pheatmap(..., silent = TRUE)$gtable
+
+  rn <- which(g$layout$name == "row_names")
+  if (length(rn) == 1) {
+    old_col <- g$layout$l[rn]
+    g <- gtable::gtable_add_cols(g, g$widths[old_col], pos = 0)
+    g$widths[old_col + 1] <- unit(0, "pt")
+    for (nm in c("row_names", "col_annotation_names")) {
+      i <- which(g$layout$name == nm)
+      if (length(i) == 1) {
+        g$layout$l[i] <- 1
+        g$layout$r[i] <- 1
+        g$grobs[[i]]$hjust <- 1
+        g$grobs[[i]]$x <- unit(1, "npc") - unit(3, "bigpts")
+      }
+    }
+  }
+
+  li <- which(g$layout$name == "legend")
+  if (length(li) == 1) {
+    title_h <- if (is.null(legend_title)) unit(0, "bigpts") else unit(24, "bigpts")
+    leg_h <- grid::unit.pmin(unit(1, "npc") - title_h, unit(150, "bigpts"))
+    kids <- grid::gList(grid::gTree(children = grid::gList(g$grobs[[li]]),
+                                    vp = grid::viewport(y = 0, height = leg_h, just = "bottom")))
+    if (!is.null(legend_title)) {
+      tg <- grid::textGrob(legend_title, x = 0, y = leg_h + unit(8, "bigpts"),
+                           just = c("left", "bottom"), gp = grid::gpar(fontsize = 14))
+      kids <- grid::gList(kids, tg)
+      lc <- g$layout$l[li]
+      mc <- g$layout$l[g$layout$name == "matrix"]
+      new_w <- max(g$widths[lc], unit(grid::convertWidth(grid::grobWidth(tg), "bigpts", TRUE) + 4, "bigpts"))
+      g$widths[mc] <- g$widths[mc] - (new_w - g$widths[lc])
+      g$widths[lc] <- new_w
+    }
+    g$grobs[[li]] <- grid::gTree(children = kids)
+    g$layout$b[li] <- g$layout$b[g$layout$name == "matrix"]
+  }
+  as.ggplot(g)
+}
+
+plot_marker_heatmap <- function(obj, genes, group.by, group_order, file, width, height, clip = 2) {
+  genes <- unique(genes[genes %in% rownames(obj)])
+  grp <- droplevels(factor(obj@meta.data[[group.by]]))
+  expr <- expm1(GetAssayData(obj, layer = "data")[genes, , drop = FALSE])
+  design <- Matrix::t(Matrix::fac2sparse(grp))
+  avg <- as.matrix(expr %*% design) %*% diag(1 / Matrix::colSums(design), ncol(design))
+  colnames(avg) <- levels(grp)
+  z <- t(scale(t(avg)))
+  z[is.na(z)] <- 0
+  z <- z[, intersect(group_order, colnames(z)), drop = FALSE]
+  z <- pmin(pmax(z, -clip), clip)
+  p <- pheatmap_left(z, cluster_rows = FALSE, cluster_cols = FALSE,
+                     color = heatmap_colors, breaks = seq(-clip, clip, length.out = 101),
+                     border_color = "grey80", fontsize_row = 10, fontsize_col = 10, angle_col = 90,
+                     legend_title = "Z-score")
+  save_plot(p, file, width, height)
+}
+
+per_sample <- function(obj, value, group.by) {
+  obj@meta.data %>%
+    mutate(.value = value) %>%
+    group_by(group = .data[[group.by]], batch, condition, .drop = TRUE) %>%
+    summarise(mean = mean(.value),
+              logmean = log1p(mean(expm1(.value))),
+              n_nuclei = n(), .groups = "drop")
+}
+
+plot_group_box <- function(df, y, ylab, title = NULL, from_zero = TRUE) {
+  p <- ggplot(df, aes(group, .data[[y]], fill = condition)) +
+    geom_boxplot(position = position_dodge(0.8), width = 0.7, colour = "black", outlier.shape = NA) +
+    geom_point(aes(group = condition),
+               position = position_jitterdodge(jitter.width = 0.15, jitter.height = 0,
+                                               dodge.width = 0.8, seed = 1),
+               size = 2.5, shape = 15, colour = "black", show.legend = FALSE) +
+    scale_fill_manual(values = condition_colors) +
+    labs(title = title, x = NULL, y = ylab, fill = NULL) +
+    theme_box +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  if (from_zero) p <- p + scale_y_continuous(limits = c(0, NA), expand = expansion(mult = c(0, 0.05)))
+  p
+}
+
+plot_single_box <- function(df, ylab, title, from_zero = TRUE) {
+  p <- ggplot(df, aes(condition, value, fill = condition)) +
+    geom_boxplot(width = 0.6, colour = "black", outlier.shape = NA) +
+    geom_point(shape = 15, size = 2.5, colour = "black") +
+    scale_fill_manual(values = condition_colors, guide = "none") +
+    labs(title = title, x = NULL, y = ylab) +
+    theme_box
+  if (from_zero) {
+    p + scale_y_continuous(limits = c(0, NA), expand = expansion(mult = c(0, 0.08)))
+  } else {
+    p + geom_blank(data = mutate(df, value = 0)) +
+      scale_y_continuous(expand = expansion(mult = c(0.05, 0.08)))
+  }
+}
+
+pseudobulk <- function(counts, samples) {
+  samples <- factor(samples)
+  design <- Matrix::sparse.model.matrix(~ 0 + samples)
+  colnames(design) <- levels(samples)
+  as.matrix(counts %*% design)
+}
+
+run_pseudobulk_de <- function(obj, group.by, min_nuclei = 10) {
+  counts <- GetAssayData(obj, assay = raw_assay, layer = "counts")
+  md <- obj@meta.data
+  results_list <- list()
+  for (g in levels(droplevels(factor(md[[group.by]])))) {
+    cells <- rownames(md)[md[[group.by]] == g]
+    n_per_sample <- table(md[cells, "batch"])
+    cells <- cells[md[cells, "batch"] %in% names(n_per_sample)[n_per_sample >= min_nuclei]]
+    col_data <- md[cells, ] %>% distinct(batch, condition) %>%
+      mutate(batch = as.character(batch)) %>% arrange(batch)
+    if (nlevels(droplevels(factor(col_data$condition))) < 2 ||
+        any(table(droplevels(factor(col_data$condition))) < 2)) next
+
+    pb <- pseudobulk(counts[, cells], as.character(md[cells, "batch"]))[, col_data$batch]
+    pb <- pb[rowSums(pb >= 10) >= 2, , drop = FALSE]
+    dds <- DESeqDataSetFromMatrix(round(pb), colData = data.frame(col_data, row.names = col_data$batch),
+                                  design = ~ condition)
+    dds <- DESeq(dds, quiet = TRUE)
+    results_list[[g]] <- results(dds, contrast = c("condition", "shCiita", "Mock")) %>%
+      as.data.frame() %>%
+      rownames_to_column("gene") %>%
+      mutate(celltype = g, n_nuclei = length(cells)) %>%
+      arrange(pvalue)
+  }
+  bind_rows(results_list)
+}
+
+absent_in_one_condition <- function(obj, group.by, group) {
+  cells <- colnames(obj)[obj@meta.data[[group.by]] == group]
+  pb <- pseudobulk(GetAssayData(obj, assay = raw_assay, layer = "counts")[, cells],
+                   as.character(obj$batch[match(cells, colnames(obj))]))
+  cond <- as.character(sample_info$condition[match(colnames(pb), sample_info$batch)])
+  zero_mock <- rowSums(pb[, cond == "Mock", drop = FALSE]) == 0
+  zero_sh   <- rowSums(pb[, cond == "shCiita", drop = FALSE]) == 0
+  rownames(pb)[zero_mock | zero_sh]
+}
+
+plot_volcano <- function(res, label_genes, title, file, exclude = character(0)) {
+  df <- res %>%
+    dplyr::filter(!is.na(pvalue), !gene %in% exclude) %>%
+    mutate(dir = case_when(pvalue < 0.05 & log2FoldChange > 0 ~ "up in shCiita",
+                           pvalue < 0.05 & log2FoldChange < 0 ~ "down in shCiita",
+                           TRUE ~ "n.s."),
+           sig_adj = !is.na(padj) & padj < 0.05)
+  p <- ggplot(df, aes(log2FoldChange, -log10(pvalue))) +
+    geom_point(aes(colour = dir), size = 1) +
+    geom_point(data = dplyr::filter(df, sig_adj), shape = 21, size = 2.2, colour = "black", stroke = 0.6) +
+    geom_hline(yintercept = -log10(0.05), colour = "grey50", linetype = 2) +
+    geom_vline(xintercept = 0, colour = "grey80") +
+    geom_text_repel(data = dplyr::filter(df, gene %in% label_genes), aes(label = gene),
+                    size = 3.2, fontface = "italic", max.overlaps = 50, min.segment.length = 0) +
+    scale_colour_manual(values = c("up in shCiita" = "#BF0027", "down in shCiita" = "#083269",
+                                   "n.s." = "grey80")) +
+    labs(title = title, x = "log2 fold change (shCiita vs Mock)", y = "-log10 P", colour = NULL) +
+    theme_box
+  save_plot(p, file, 6, 5)
+}
+
+plot_sample_heatmap <- function(obj, group.by, group, genes, title, file, gaps_row = NULL) {
+  cells <- colnames(obj)[obj@meta.data[[group.by]] == group]
+  counts <- GetAssayData(obj, assay = raw_assay, layer = "counts")[, cells]
+  pb <- pseudobulk(counts, as.character(obj$batch[match(cells, colnames(obj))]))
+  pb <- pb[, intersect(sample_order, colnames(pb)), drop = FALSE]
+  sf <- DESeq2::estimateSizeFactorsForMatrix(pb[rowSums(pb >= 10) >= 2, , drop = FALSE])
+  norm <- log2(sweep(pb, 2, sf, "/") + 1)
+  genes <- genes[genes %in% rownames(norm)]
+  z <- t(scale(t(norm[genes, , drop = FALSE])))
+  z[is.na(z)] <- 0
+  anno <- data.frame(condition = as.character(sample_info$condition[match(colnames(z), sample_info$batch)]),
+                     row.names = colnames(z))
+  p <- pheatmap_left(z, cluster_rows = FALSE, cluster_cols = FALSE,
+                     color = heatmap_colors, breaks = seq(-1.6, 1.6, length.out = 101),
+                     border_color = "grey80", fontsize_row = 10, fontsize_col = 10, angle_col = 90,
+                     annotation_col = anno, annotation_colors = list(condition = condition_colors),
+                     annotation_legend = FALSE, gaps_col = 2, gaps_row = gaps_row,
+                     legend_title = "Z-score", main = title)
+  save_plot(p, file, 3.6, 1.6 + 0.3 * length(genes))
+}
+
+top_genes <- function(res, exclude, n = 10) {
+  top <- res %>%
+    dplyr::filter(!is.na(pvalue), pvalue < 0.05, !gene %in% exclude, !grepl("^Hb[ab]-", gene)) %>%
+    arrange(pvalue)
+  list(up = head(top$gene[top$log2FoldChange > 0], n),
+       down = head(top$gene[top$log2FoldChange < 0], n))
+}
+```
+
+## Load the processed object
+
+```{r}
+#| label: load
+data <- readRDS(input_rds)
+if (inherits(data, "SingleCellExperiment")) {
+  data <- as.Seurat(data, counts = "counts", data = "logcounts")
+}
+stopifnot(all(c("annotation", "condition", "batch") %in% colnames(data@meta.data)))
+
+raw_assay <- DefaultAssay(data)
+umap_red  <- grep("umap", Reductions(data), ignore.case = TRUE, value = TRUE)[1]
+
+cell_order <- c("CM", "ArtEC", "VeinEC", "EndoEC", "LymphEC", "CapEC",
+                "T_cells", "B_cells", "MP", "MP_recruited", "Mast",
+                "Pericytes", "SMC", "Fibroblasts", "Fibro_activ", "Adip", "Epi_cells")
+data$annotation <- factor(as.character(data$annotation),
+                          levels = c(cell_order, setdiff(unique(as.character(data$annotation)), cell_order)))
+data$condition <- factor(as.character(data$condition), levels = c("Mock", "shCiita"))
+data$batch     <- factor(as.character(data$batch))
+
+sample_info  <- data@meta.data %>% distinct(batch, condition) %>% arrange(condition, batch)
+sample_order <- as.character(sample_info$batch)
+```
+
+## Ambient RNA removal (decontX)
+
+```{r}
+#| label: decontx
+decontx_rds <- file.path(obj_dir, "snRNA_heart_decontX_filtered.rds")
+contamination_cutoff <- 0.2
+
+if (file.exists(decontx_rds)) {
+  data <- readRDS(decontx_rds)
+} else {
+  sce <- SingleCellExperiment(
+    assays  = list(counts = GetAssayData(data, assay = raw_assay, layer = "counts")),
+    colData = data@meta.data[, c("batch", "annotation")]
+  )
+  sce <- decontX(sce, z = as.character(sce$annotation), batch = as.character(sce$batch))
+
+  data$decontX_contamination <- sce$decontX_contamination
+  data[["decontX"]] <- CreateAssayObject(counts = decontXcounts(sce))
+  DefaultAssay(data) <- "decontX"
+  data <- NormalizeData(data, verbose = FALSE)
+  rm(sce); gc()
+
+  data$decontX_removed <- data$decontX_contamination >= contamination_cutoff
+  qc <- data@meta.data %>%
+    group_by(batch, condition) %>%
+    summarise(nuclei_before = n(),
+              removed = sum(decontX_removed),
+              nuclei_after = sum(!decontX_removed),
+              median_contamination = median(decontX_contamination), .groups = "drop")
+  write.csv(qc, file.path(tab_dir, "decontX_QC_per_sample.csv"), row.names = FALSE)
+
+  data <- subset(data, cells = colnames(data)[!data$decontX_removed])
+  saveRDS(data, decontx_rds)
+}
+DefaultAssay(data) <- "decontX"
+data$annotation <- droplevels(data$annotation)
+```
+
+## Endothelial cells: re-clustering and venous ECs
+
+```{r}
+#| label: ec-subclustering
+ec_sub <- subset(data, subset = annotation %in% c("ArtEC", "EndoEC", "LymphEC", "CapEC"))
+ec_sub$annotation_original <- as.character(ec_sub$annotation)
+ec_sub <- recluster(ec_sub, dims = 1:20, resolution = 0.8)
+
+ec_programmes <- list(
+  ArtEC   = c("Sema3g", "Gja5", "Gja4", "Efnb2", "Hey1", "Bmx"),
+  VeinEC  = c("Nr2f2", "Vwf", "Vcam1", "Ackr1", "Selp", "Lrg1"),
+  EndoEC  = c("Npr3", "Nrg1", "Cdh11", "Nfatc1", "Hapln1"),
+  LymphEC = c("Prox1", "Mmrn1", "Flt4", "Reln"),
+  CapEC   = c("Rgcc", "Car4", "Aplnr", "Cd36")
+)
+for (s in names(ec_programmes)) ec_sub <- add_score(ec_sub, ec_programmes[[s]], paste0("prog_", s))
+prog_cols <- paste0("prog_", names(ec_programmes))
+
+ec_calls <- ec_sub@meta.data %>%
+  group_by(subcluster) %>%
+  summarise(n_nuclei = n(),
+            original_label = names(which.max(table(annotation_original))),
+            across(all_of(prog_cols), mean), .groups = "drop")
+z <- scale(as.matrix(ec_calls[, prog_cols]))
+colnames(z) <- names(ec_programmes)
+z_best     <- apply(z, 1, max)
+best       <- colnames(z)[apply(z, 1, which.max)]
+z_original <- z[cbind(seq_len(nrow(z)), match(ec_calls$original_label, colnames(z)))]
+ec_calls$label <- ifelse(best == "VeinEC" & z_best - z_original > 0.5 & z_best > 0.5,
+                         "VeinEC", ec_calls$original_label)
+write.csv(ec_calls, file.path(tab_dir, "EC_subcluster_calls.csv"), row.names = FALSE)
+
+ec_types <- c("ArtEC", "VeinEC", "EndoEC", "LymphEC", "CapEC")
+ec_types <- ec_types[ec_types %in% ec_calls$label]
+ec_sub$ec_type <- factor(ec_calls$label[match(ec_sub$subcluster, ec_calls$subcluster)], levels = ec_types)
+
+new_annotation <- as.character(data$annotation)
+new_annotation[match(colnames(ec_sub), colnames(data))] <- as.character(ec_sub$ec_type)
+data$annotation <- droplevels(factor(new_annotation,
+                                     levels = c(cell_order, setdiff(unique(new_annotation), cell_order))))
+```
+
+## Immune cells: re-clustering
+
+```{r}
+#| label: immune-subclustering
+immune <- subset(data, subset = annotation %in% c("T_cells", "B_cells", "MP", "MP_recruited", "Mast"))
+immune <- recluster(immune, dims = 1:20, resolution = 0.8)
+check_cluster_sizes(immune, c(2802, 2182, 2092, 1676, 904, 822, 722, 511, 492, 367, 351, 261,
+                              259, 231, 169, 136, 104, 85, 69), "Immune cells")
+
+immune_labels <- c(
+  "0"  = "MP_resident",
+  "2"  = "MP_resident",
+  "3"  = "MP_resident",
+  "14" = "MP_resident",
+  "1"  = "MP_MHCIIhi",
+  "6"  = "MP_Lgals3",
+  "10" = "MP_Arg1_Spp1",
+  "11" = "MP_IFN",
+  "8"  = "MoMP_Ccr2",
+  "7"  = "Mono_Ly6Clo",
+  "15" = "Neutrophils",
+  "13" = "cDC1",
+  "9"  = "Cycling",
+  "4"  = "T_cells",
+  "17" = "Treg",
+  "18" = "gdT17",
+  "12" = "NK_cells",
+  "16" = "ILC2",
+  "5"  = "B_cells"
+)
+immune$immune_annot <- unname(immune_labels[as.character(immune$subcluster)])
+
+major_types <- c(MP_resident = "MP", MP_MHCIIhi = "MP", MP_Lgals3 = "MP", MP_IFN = "MP",
+                 MP_Arg1_Spp1 = "MP_recruited", Cycling = "MP_recruited",
+                 MoMP_Ccr2 = "MP_recruited", Mono_Ly6Clo = "MP_recruited",
+                 Treg = "T_cells", gdT17 = "T_cells")
+major <- immune$immune_annot
+major[major %in% names(major_types)] <- major_types[major[major %in% names(major_types)]]
+immune$immune_major <- factor(major, levels = c("MP", "MP_recruited", "Neutrophils", "cDC1", "T_cells",
+                                                "NK_cells", "ILC2", "B_cells"))
+```
+
+## T cells: re-clustering
+
+```{r}
+#| label: tcell-subclustering
+lymph <- subset(data, subset = annotation == "T_cells")
+lymph <- recluster(lymph, dims = 1:15, resolution = 0.8)
+check_cluster_sizes(lymph, c(338, 243, 157, 116, 108, 94, 93, 78, 75, 70, 34, 18, 13), "Lymphocytes")
+
+t_clusters <- c("0", "1", "3", "6", "7", "8", "9", "10")
+tcells <- subset(lymph, subset = subcluster %in% t_clusters)
+tcells <- recluster(tcells, dims = 1:15, resolution = 0.8)
+
+t_signatures <- list(
+  Naive_CD4   = c("Cd4", "Klf2", "Il7r", "Ccr7", "Lef1", "Tcf7"),
+  Naive_CD8   = c("Cd8a", "Cd8b1", "Dapl1", "Klf2", "Ccr7", "Lef1"),
+  Resting_CD8 = c("Cd8a", "Cd8b1", "Ly6c1", "Il7r"),
+  Memory_CD8  = c("Cd8a", "Cd8b1", "Ly6c2", "Cxcr3", "Il2rb", "Ccl5", "Gzmk"),
+  Effector_T  = c("Id2", "Ifng", "Klrk1", "Nkg7", "S100a6", "Cxcr6", "Il2rb"),
+  Treg        = c("Ctla4", "Il2ra", "Tnfrsf4", "Tnfrsf18", "Foxp3", "Ikzf2", "Itgae"),
+  gdT         = c("Trdc", "Tcrg-C1", "Il23r", "Rorc", "Zbtb16"),
+  Cycling     = c("Tk1", "Ube2c", "Mki67", "Top2a")
+)
+for (s in names(t_signatures)) tcells <- add_score(tcells, t_signatures[[s]], paste0("tsig_", s))
+tsig_cols <- paste0("tsig_", names(t_signatures))
+
+t_calls <- tcells@meta.data %>%
+  group_by(subcluster) %>%
+  summarise(n_nuclei = n(), across(all_of(tsig_cols), mean), .groups = "drop")
+tz <- scale(as.matrix(t_calls[, tsig_cols]))
+tz[is.na(tz)] <- 0
+colnames(tz) <- names(t_signatures)
+t_calls$label <- colnames(tz)[apply(tz, 1, which.max)]
+t_calls$label[t_calls$subcluster == "7"] <- "Proliferating_NKT"
+write.csv(t_calls, file.path(tab_dir, "Tcell_subcluster_calls.csv"), row.names = FALSE)
+
+t_order <- c("Naive_CD4", "Naive_CD8", "Resting_CD8", "Memory_CD8", "Effector_T",
+             "Proliferating_NKT", "Cycling", "Treg", "gdT")
+t_order <- c(intersect(t_order, t_calls$label), setdiff(unique(t_calls$label), t_order))
+tcells$t_subtype <- factor(t_calls$label[match(tcells$subcluster, t_calls$subcluster)], levels = t_order)
+t_order <- levels(droplevels(tcells$t_subtype))
+```
+
+## Cell labels used in the paper
+
+Re-clustering can differ slightly between package versions and runs. To reproduce the published figure exactly, the EC, immune and T cell labels and the subcluster UMAPs of the published analysis are loaded from `metadata/published_cell_labels.csv.gz`.
+
+```{r}
+#| label: published-labels
+published <- read.csv(gzfile("metadata/published_cell_labels.csv.gz"))
+rownames(published) <- published$cell
+
+ec_types <- intersect(c("ArtEC", "VeinEC", "EndoEC", "LymphEC", "CapEC"), published$ec_type)
+ec_sub <- subset(data, cells = published$cell[!is.na(published$ec_type)])
+ec_sub$ec_type <- factor(published[colnames(ec_sub), "ec_type"], levels = ec_types)
+ec_umap <- as.matrix(published[colnames(ec_sub), c("ec_umap_1", "ec_umap_2")])
+colnames(ec_umap) <- c("umapsub_1", "umapsub_2")
+ec_sub[["umap_sub"]] <- CreateDimReducObject(ec_umap, key = "umapsub_", assay = "decontX")
+
+new_annotation <- as.character(data$annotation)
+new_annotation[match(colnames(ec_sub), colnames(data))] <- as.character(ec_sub$ec_type)
+data$annotation <- droplevels(factor(new_annotation,
+                                     levels = c(cell_order, setdiff(unique(new_annotation), cell_order))))
+
+immune$immune_annot <- published[colnames(immune), "immune_annot"]
+major <- immune$immune_annot
+major[major %in% names(major_types)] <- major_types[major[major %in% names(major_types)]]
+immune$immune_major <- factor(major, levels = c("MP", "MP_recruited", "Neutrophils", "cDC1", "T_cells",
+                                                "NK_cells", "ILC2", "B_cells"))
+
+t_order <- c("Naive_CD4", "Naive_CD8", "Resting_CD8", "Memory_CD8", "Effector_T",
+             "Proliferating_NKT", "Cycling", "Treg", "gdT")
+tcells <- subset(data, cells = published$cell[!is.na(published$t_subtype)])
+tcells$t_subtype <- droplevels(factor(published[colnames(tcells), "t_subtype"], levels = t_order))
+t_order <- levels(tcells$t_subtype)
+t_umap <- as.matrix(published[colnames(tcells), c("t_umap_1", "t_umap_2")])
+colnames(t_umap) <- c("umapsub_1", "umapsub_2")
+tcells[["umap_sub"]] <- CreateDimReducObject(t_umap, key = "umapsub_", assay = "decontX")
+
+stopifnot(!anyNA(ec_sub$ec_type), !anyNA(immune$immune_annot), !anyNA(tcells$t_subtype))
+```
+
+## Final cell-type labels
+
+```{r}
+#| label: celltype-labels
+im_cells <- intersect(colnames(immune), colnames(data))
+lab <- setNames(as.character(data$annotation), colnames(data))
+lab[im_cells] <- as.character(immune$immune_major[im_cells])
+data$celltype <- lab[colnames(data)]
+
+write.csv(as.data.frame.matrix(table(data$annotation, data$batch)),
+          file.path(tab_dir, "nuclei_per_celltype_and_sample.csv"))
+
+mhc_genes <- intersect(c("Cd74", "H2-Aa", "H2-Ab1", "H2-Eb1"), rownames(data))
+```
+
+## UMAP and marker heatmap of all nuclei
+
+```{r}
+#| label: fig-overview
+#| fig-height: 9
+save_plot(DimPlot(data, reduction = umap_red, group.by = "annotation", raster = FALSE) + labs(title = NULL),
+          "UMAP_all_celltypes.pdf", 9, 7)
+
+annotation_markers <- c("Tnni3", "Ttn", "Myh6", "Cdh5", "Pecam1", "Sema3g", "Gja5", "Efnb2",
+                        "Vwf", "Ackr1", "Vcam1", "Npr3", "Cdh11", "Hapln1", "Prox1", "Lyve1", "Flt4",
+                        "Rgcc", "Kdr", "Car4", "Aplnr", "Ptprc", "Cd3d", "Cd3e", "Themis",
+                        "Cd79a", "Bank1", "Igkc", "Adgre1", "C1qa", "Cd163", "Lyz2", "Ccr2", "Kit",
+                        "Rgs5", "Pdgfrb", "Acta2", "Myh11", "Pdgfra", "Col1a1", "Postn", "Cthrc1",
+                        "Adipoq", "Plin1", "Krt19", "Msln")
+plot_marker_heatmap(data, annotation_markers, "annotation", levels(data$annotation),
+                    "Heatmap_celltype_markers.pdf", 5, 9)
+```
+
+## Ciita and MHC-II in ECs and macrophages
+
+```{r}
+#| label: fig-ciita-mhcii
+#| fig-width: 2.4
+#| fig-height: 3.4
+compare_groups <- c("ECs", "MP", "MP_recruited")
+celltype <- unname(as.character(data$celltype))
+data$compare_group <- case_when(celltype %in% ec_types ~ "ECs",
+                                celltype %in% c("MP", "MP_recruited") ~ celltype,
+                                TRUE ~ NA_character_)
+
+ciita_compare <- per_sample(data, FetchData(data, vars = "Ciita", layer = "data")[, 1], "compare_group") %>%
+  dplyr::filter(!is.na(group)) %>%
+  transmute(group, batch, condition, value = logmean, measure = "Ciita")
+
+ec_sub <- add_score(ec_sub, mhc_genes, "MHCII_score", seed = 42)
+mhc_within <- setNames(ec_sub$MHCII_score, colnames(ec_sub))
+for (g in c("MP", "MP_recruited")) {
+  o <- subset(data, cells = colnames(data)[which(data$compare_group == g)])
+  o <- add_score(o, mhc_genes, "MHCII_score", seed = 42)
+  mhc_within <- c(mhc_within, setNames(o$MHCII_score, colnames(o)))
+}
+mhc_compare <- data@meta.data %>%
+  mutate(score = unname(mhc_within[colnames(data)])) %>%
+  dplyr::filter(!is.na(compare_group)) %>%
+  group_by(group = compare_group, batch, condition) %>%
+  summarise(value = mean(score, na.rm = TRUE), .groups = "drop") %>%
+  mutate(measure = "MHCII_score")
+
+compare_df <- bind_rows(ciita_compare, mhc_compare)
+write.csv(compare_df, file.path(tab_dir, "Ciita_MHCII_ECs_vs_MP_per_sample.csv"), row.names = FALSE)
+
+for (g in compare_groups) {
+  p <- plot_single_box(dplyr::filter(compare_df, measure == "Ciita", group == g),
+                       "Ciita expression (Log(nUMI))", g)
+  print(save_plot(p, paste0("Boxplot_Ciita_", g, ".pdf"), 2.4, 3.4))
+
+  p <- plot_single_box(dplyr::filter(compare_df, measure == "MHCII_score", group == g),
+                       "MHC-II score", g, from_zero = FALSE) +
+    geom_hline(yintercept = 0, colour = "grey60", linetype = 2)
+  print(save_plot(p, paste0("Boxplot_MHCII_score_", g, ".pdf"), 2.4, 3.4))
+}
+```
+
+## Endothelial subtypes
+
+```{r}
+#| label: fig-ec
+p <- DimPlot(ec_sub, reduction = "umap_sub", group.by = "ec_type", label = TRUE, repel = TRUE) +
+  labs(title = NULL)
+save_plot(p, "UMAP_EC_subtypes.pdf", 7.5, 7)
+
+ec_heatmap_order <- c("ArtEC", "CapEC", "VeinEC", "EndoEC", "LymphEC")
+ec_markers <- c("Gja5", "Efnb2", "Sema3g", "Hey1", "Car4", "Rgcc", "Ackr1", "Sele", "Selp",
+                "Npr3", "Nrg1", "Cdh11", "Prox1", "Lyve1", "Pdpn", "Ccl21a")
+plot_marker_heatmap(ec_sub, ec_markers, "ec_type", ec_heatmap_order,
+                    "Heatmap_EC_subtype_markers.pdf", 3.5, 6)
+
+ciita_ec <- per_sample(ec_sub, FetchData(ec_sub, vars = "Ciita", layer = "data")[, 1], "ec_type") %>%
+  mutate(group = factor(group, levels = ec_types))
+write.csv(ciita_ec, file.path(tab_dir, "Ciita_EC_subtypes_per_sample.csv"), row.names = FALSE)
+save_plot(plot_group_box(ciita_ec, "logmean", "Ciita expression (Log(nUMI))", "Ciita"),
+          "Boxplot_Ciita_EC_subtypes.pdf", 5, 4.5)
+
+mhc_ec <- per_sample(ec_sub, ec_sub$MHCII_score, "ec_type") %>%
+  mutate(group = factor(group, levels = ec_types))
+write.csv(mhc_ec, file.path(tab_dir, "MHCII_score_EC_subtypes_per_sample.csv"), row.names = FALSE)
+p <- plot_group_box(mhc_ec, "mean", "MHC-II score", "MHC II programme", from_zero = FALSE) +
+  geom_hline(yintercept = 0, colour = "grey60", linetype = 2)
+save_plot(p, "Boxplot_MHCII_score_EC_subtypes.pdf", 5, 4.5)
+```
+
+## T cells
+
+```{r}
+#| label: fig-tcells
+save_plot(DimPlot(tcells, reduction = "umap_sub", group.by = "t_subtype") + labs(title = NULL),
+          "UMAP_Tcell_subtypes.pdf", 8, 7)
+
+t_markers <- list(
+  Naive_CD4         = c("Cd4", "Lef1", "Satb1", "Bach2", "Sell"),
+  Naive_CD8         = c("Cd8b1", "Ccr7", "Klf2", "Dapl1"),
+  Resting_CD8       = c("Ly6c1", "Il7r"),
+  Memory_CD8        = c("Cd8a", "Ccl5", "Klrk1", "Klrc1", "Nkg7"),
+  Effector_T        = c("Itga1", "P2rx7", "Trerf1", "Chn2", "Cd226", "Tbx21", "Id2"),
+  Proliferating_NKT = c("Mki67", "Top2a", "Clspn"),
+  Treg              = c("Foxp3", "Ikzf2", "Il1rl1", "Klrg1"),
+  gdT               = c("Trdc", "Il23r", "Rorc", "Zbtb16")
+)
+plot_marker_heatmap(tcells, unlist(t_markers[intersect(t_order, names(t_markers))], use.names = FALSE),
+                    "t_subtype", t_order, "Heatmap_Tcell_subtype_markers.pdf", 4.5, 9)
+
+t_comp <- tcells@meta.data %>%
+  dplyr::count(batch, t_subtype, name = "n", .drop = FALSE) %>%
+  left_join(sample_info, by = "batch") %>%
+  group_by(batch) %>%
+  mutate(pct = 100 * n / sum(n)) %>%
+  ungroup()
+write.csv(t_comp, file.path(tab_dir, "Tcell_composition_per_sample.csv"), row.names = FALSE)
+
+t_comp_mean <- t_comp %>%
+  group_by(condition, t_subtype) %>%
+  summarise(pct = mean(pct), .groups = "drop")
+p <- ggplot(t_comp_mean, aes(condition, pct, fill = t_subtype)) +
+  geom_col(colour = "black", width = 0.7) +
+  geom_text(aes(label = ifelse(pct >= 3, sprintf("%.0f%%", pct), "")),
+            position = position_stack(vjust = 0.5), size = 3) +
+  scale_y_continuous(labels = function(x) paste0(x, "%"), expand = c(0, 0)) +
+  labs(title = "T cell composition", x = NULL, y = NULL, fill = NULL) +
+  theme_box +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+save_plot(p, "StackedBar_Tcell_composition.pdf", 4.5, 6)
+
+for (st in c("Naive_CD4", "Treg")) {
+  title <- sub("_", " ", st)
+  d <- t_comp %>% dplyr::filter(t_subtype == st) %>% transmute(condition, value = pct)
+  print(save_plot(plot_single_box(d, paste0("% ", title, " of all T cells"), title),
+                  paste0("Boxplot_pct_", st, "_of_Tcells.pdf"), 2.4, 3.4))
+}
+```
+
+## Differential expression in T cells and recruited macrophages
+
+```{r}
+#| label: fig-deg
+#| fig-width: 6
+#| fig-height: 5
+de_t <- run_pseudobulk_de(subset(immune, subset = immune_major == "T_cells"), "immune_major")
+write.csv(de_t, file.path(tab_dir, "PseudobulkDE_Tcells_shCiita_vs_Mock.csv"), row.names = FALSE)
+
+mp <- subset(immune, subset = immune_major %in% c("MP", "MP_recruited"))
+mp$immune_major <- droplevels(mp$immune_major)
+de_mp <- run_pseudobulk_de(mp, "immune_major")
+write.csv(de_mp, file.path(tab_dir, "PseudobulkDE_MP_MPrecruited_shCiita_vs_Mock.csv"), row.names = FALSE)
+
+deg_sets <- list(
+  Tcells = list(obj = immune, group.by = "immune_major", group = "T_cells", res = de_t,
+                title = "T cells: shCiita vs Mock",
+                labels = c("Cd44", "Mir155hg", "Itgb8", "Capg", "Ifngas1", "Myo1e")),
+  MP_recruited = list(obj = mp, group.by = "immune_major", group = "MP_recruited",
+                      res = dplyr::filter(de_mp, celltype == "MP_recruited"),
+                      title = "MP_recruited: shCiita vs Mock",
+                      labels = c("Spp1", "Mmp19", "Adamts6", "Mmp12", "Arg1", "Retnla", "Chil3", "Lpl",
+                                 "Cd36", "Fn1", "Ace", "Treml4", "Cd300e", "Nr4a1"))
+)
+
+top_tables <- list()
+for (nm in names(deg_sets)) {
+  s <- deg_sets[[nm]]
+  excl <- absent_in_one_condition(s$obj, s$group.by, s$group)
+  print(plot_volcano(s$res, s$labels, s$title, paste0("Volcano_", nm, ".pdf"), exclude = excl))
+
+  top <- top_genes(s$res, excl, n = 10)
+  gap <- if (length(top$up) > 0 && length(top$down) > 0) length(top$up) else NULL
+  plot_sample_heatmap(s$obj, s$group.by, s$group, c(top$up, top$down), nm,
+                      paste0("Heatmap_", nm, "_top10_up_down.pdf"), gaps_row = gap)
+  top_tables[[nm]] <- dplyr::filter(s$res, gene %in% c(top$up, top$down))
+}
+write.csv(bind_rows(top_tables, .id = "group") %>%
+            dplyr::select(group, gene, baseMean, log2FoldChange, pvalue, padj),
+          file.path(tab_dir, "Top10_up_down_genes_heatmaps.csv"), row.names = FALSE)
+```
+
+## Il1b in resident macrophages
+
+```{r}
+#| label: fig-il1b
+#| fig-width: 2.4
+#| fig-height: 3.4
+mp_resident <- subset(mp, subset = immune_major == "MP")
+il1b <- per_sample(mp_resident, FetchData(mp_resident, vars = "Il1b", layer = "data")[, 1], "immune_major")
+write.csv(il1b, file.path(tab_dir, "Il1b_MP_per_sample.csv"), row.names = FALSE)
+
+format_p <- function(x) {
+  e <- floor(log10(x))
+  sprintf("p = %.2fe%s%03d", x / 10^e, ifelse(e < 0, "-", "+"), abs(e))
+}
+il1b_p <- de_mp %>% dplyr::filter(celltype == "MP", gene == "Il1b") %>% pull(pvalue)
+y_top <- max(il1b$logmean) * 1.12
+
+p <- ggplot(il1b, aes(condition, logmean, fill = condition)) +
+  geom_boxplot(width = 0.6, colour = "black", outlier.shape = NA) +
+  geom_point(shape = 15, size = 2.5, colour = "black") +
+  annotate("segment", x = c(1, 1, 2), xend = c(2, 1, 2),
+           y = y_top, yend = c(y_top, y_top * 0.95, y_top * 0.95), linewidth = 0.6) +
+  annotate("text", x = 1.5, y = y_top * 1.04, label = format_p(il1b_p), size = 3.5, vjust = 0) +
+  scale_fill_manual(values = condition_colors, guide = "none") +
+  scale_y_continuous(limits = c(0, y_top * 1.15), expand = expansion(mult = c(0, 0.02))) +
+  labs(title = "MP", x = NULL, y = "Il1b expression (Log(nUMI))") +
+  theme_box
+save_plot(p, "Boxplot_Il1b_MP.pdf", 2.4, 3.4)
+```
