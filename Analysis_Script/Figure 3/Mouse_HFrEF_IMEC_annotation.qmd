@@ -1,0 +1,99 @@
+---
+title: "Mouse HFrEF – IMEC annotation"
+format: html
+editor: visual
+editor_options: 
+  chunk_output_type: console
+---
+
+## 0 Setup
+
+```{r}
+library(Seurat)
+library(ggplot2)
+library(dplyr)
+
+base     <- "/Volumes/Storage++/Objects/Ciita Manuscript/Mouse IMEC annotation"
+data_dir <- file.path(base, "Data")
+res_dir  <- file.path(base, "Results")
+tab_dir  <- file.path(res_dir, "tables")
+dir.create(tab_dir, recursive = TRUE, showWarnings = FALSE)
+
+strip_suffix <- function(x) sub("-\\d+$", "", x)
+```
+
+## 1 Recluster endothelial and myeloid cells of the integrated AMI + HFrEF object
+
+```{r}
+integrated <- readRDS(file.path(data_dir, "Integration_All.cells_Full.annotation.rds"))
+
+ec_my <- subset(integrated, subset = leiden_05 %in% c("2", "3", "9", "10", "11", "14"))
+
+ndims <- min(30, ncol(Embeddings(ec_my, "X_scVI")))
+ec_my <- FindNeighbors(ec_my, dims = 1:ndims, reduction = "X_scVI")
+ec_my <- FindClusters(ec_my, resolution = 0.3)
+ec_my <- RunUMAP(ec_my, dims = 1:ndims, reduction = "X_scVI")
+
+DimPlot(ec_my, group.by = "seurat_clusters", label = TRUE, label.box = TRUE)
+ggsave("UMAP_EC_Myeloid_res0.3.pdf", path = res_dir, width = 8, height = 7)
+
+DotPlot(ec_my, group.by = "seurat_clusters",
+        features = c("Cdh5", "Pecam1", "Kdr", "Prox1", "Lyve1", "Ptprc", "Runx1", "Cd68", "Ciita",
+                     "H2-Aa", "H2-Ab1", "Cd74", "S100a8", "Adipoq"), scale = FALSE) + RotatedAxis()
+ggsave("DotPlot_EC_Myeloid_res0.3_markers.pdf", path = res_dir, width = 10, height = 7)
+```
+
+## 2 Annotation (cluster 11 = IMEC)
+
+```{r}
+cluster_map <- c("0"  = "Capillary EC",
+                 "1"  = "Monocytes (infiltrating)",
+                 "2"  = "Monocytes",
+                 "3"  = "Venous EC",
+                 "4"  = "Monocytes",
+                 "5"  = "Monocytes (infiltrating)",
+                 "6"  = "Lymphatic EC",
+                 "7"  = "Monocytes",
+                 "8"  = "Neutrophils",
+                 "9"  = "Capillary EC",
+                 "10" = "Venous EC",
+                 "11" = "IMEC",
+                 "12" = "Monocytes",
+                 "13" = "Aterial EC",
+                 "14" = "Monocytes",
+                 "15" = "Adipose cells",
+                 "16" = "Capillary EC")
+
+ec_my$cell_type <- unname(cluster_map[as.character(ec_my$seurat_clusters)])
+
+integrated$cell_type <- as.character(integrated$cell_type)
+integrated$cell_type[match(colnames(ec_my), colnames(integrated))] <- ec_my$cell_type
+
+write.csv(as.data.frame.matrix(table(integrated$cell_type, integrated$orig.ident)),
+          file.path(tab_dir, "Cell_types_per_sample_integrated.csv"))
+
+saveRDS(integrated, file.path(res_dir, "Integration_AMI.HFrEF_IMEC.Annotation.rds"))
+```
+
+## 3 Transfer IMEC label to the mouse Ctrl/HFrEF object
+
+```{r}
+hfref_int <- subset(integrated, subset = Experiment %in% "snRNA")
+imec_bc <- strip_suffix(colnames(hfref_int)[which(hfref_int$cell_type == "IMEC" &
+                                                  hfref_int$disease %in% c("HFrEF", "ctrl_HFrEF"))])
+
+data <- readRDS(file.path(data_dir, "260608_Mouse_HF_complete.rds")) %>%
+  subset(condition %in% c("Mice-CTRL", "Mice-HFrEF"))
+
+hits <- strip_suffix(colnames(data)) %in% imec_bc
+
+data$annotation_final <- as.character(data$annotation)
+data$annotation_final[hits] <- "IMEC"
+
+write.csv(as.data.frame.matrix(table(data$annotation_final, data$orig.ident)),
+          file.path(tab_dir, "annotation_final_per_sample.csv"))
+
+saveRDS(data, file.path(res_dir, "SeuratObject_Mice_HFrEF_Ctrl.rds"))
+
+writeLines(capture.output(sessionInfo()), file.path(res_dir, "sessionInfo.txt"))
+```
